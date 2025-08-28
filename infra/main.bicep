@@ -1,3 +1,4 @@
+targetScope = 'subscription'
 
 @minLength(1)
 @maxLength(64)
@@ -5,56 +6,58 @@
 param environmentName string
 
 @minLength(1)
-@description('Primary location for all resources')
-@allowed(['eastus', 'westus2'])
+@description('Primary location for all resources & Flex Consumption Function App')
+@allowed([
+  'australiaeast'
+  'brazilsouth'
+  'canadacentral'
+  'eastus'
+  'eastus2'
+  'francecentral'
+  'germanywestcentral'
+  'japaneast'
+  'koreacentral'
+  'northcentralus'
+  'norwayeast'
+  'southafricanorth'
+  'southcentralus'
+  'southindia'
+  'swedencentral'
+  'uaenorth'
+  'uksouth'
+  'westeurope'
+  'westus'
+  'westus3'
+])
 @metadata({
   azd: {
     type: 'location'
   }
 })
-param location string = 'eastus'
+param location string
 
-@description('Skip the creation of the virtual network and private endpoint')
-param skipVnet bool
+// only set and use agentLocation on AI resources if you need latest features e.g. MCP
+// @description('Location for AI Foundry resources (AI Services, Search, Cosmos DB, etc.)')
+// @allowed([
+//   'westus'
+//   'westus2'
+//   'uaenorth'
+//   'southindia'
+//   'switzerlandnorth'
+// ])
+// param agentLocation string
 
-@description('Name of the API service')
+param vnetEnabled bool
 param apiServiceName string = ''
-
-@description('Name of the user assigned identity')
 param apiUserAssignedIdentityName string = ''
-
-@description('Name of the application insights resource')
 param applicationInsightsName string = ''
-
-@description('Name of the app service plan')
 param appServicePlanName string = ''
-
-@description('Name of the log analytics workspace')
 param logAnalyticsName string = ''
-
-@description('Name of the resource group')
 param resourceGroupName string = ''
-
-@description('Name of the storage account')
 param storageAccountName string = ''
-
-@description('Name of the virtual network')
 param vNetName string = ''
-
-@description('Disable local authentication for Azure Monitor')
-param disableLocalAuth bool = true
-
-@description('Id of the user or app to assign application roles')
-param principalId string = ''
-
-@description('Name for the AI resource and used to derive name of dependent resources.')
-param aiHubName string = 'hub-demo'
-
-@description('Friendly name for your Hub resource')
-param aiHubFriendlyName string = 'Agents Hub resource'
-
-@description('Description of your Azure AI resource displayed in AI studio')
-param aiHubDescription string = 'This is an example AI resource for use in Azure AI Studio.'
+@description('Id of the user identity to be used for testing and debugging. This is not required in production. Leave empty if not needed.')
+param principalId string = deployer().objectId
 
 @description('Name for the AI project resources.')
 param aiProjectName string = 'project-demo'
@@ -66,22 +69,25 @@ param aiProjectFriendlyName string = 'Agents Project resource'
 param aiProjectDescription string = 'This is an example AI Project resource for use in Azure AI Studio.'
 
 @description('Name of the Azure AI Search account')
-param aiSearchName string = 'agentaisearch'
+param aiSearchName string = 'agent-ai-search'
 
 @description('Name for capabilityHost.')
-param capabilityHostName string = 'caphost1'
+param accountCapabilityHostName string = 'caphostacc'
+
+@description('Name for capabilityHost.')
+param projectCapabilityHostName string = 'caphostproj'
 
 @description('Name of the Azure AI Services account')
-param aiServicesName string = 'agentaiservices'
+param aiServicesName string = 'agent-ai-services'
 
 @description('Model name for deployment')
-param modelName string = 'gpt-4o-mini'
+param modelName string = 'gpt-4.1-mini'
 
 @description('Model format for deployment')
 param modelFormat string = 'OpenAI'
 
 @description('Model version for deployment')
-param modelVersion string = '2024-07-18'
+param modelVersion string = '2025-04-14'
 
 @description('Model deployment SKU name')
 param modelSkuName string = 'GlobalStandard'
@@ -89,8 +95,8 @@ param modelSkuName string = 'GlobalStandard'
 @description('Model deployment capacity')
 param modelCapacity int = 50
 
-@description('Model deployment location. If you want to deploy an Azure AI resource/model in different location than the rest of the resources created.')
-param modelLocation string = 'eastus'
+@description('Name of the Cosmos DB account for agent thread storage')
+param cosmosDbName string = 'agent-ai-cosmos'
 
 @description('The AI Service Account full ARM Resource ID. This is an optional field, and if not provided, the resource will be created.')
 param aiServiceAccountResourceId string = ''
@@ -101,73 +107,127 @@ param aiSearchServiceResourceId string = ''
 @description('The Ai Storage Account full ARM Resource ID. This is an optional field, and if not provided, the resource will be created.')
 param aiStorageAccountResourceId string = ''
 
-// Variables
+@description('The Cosmos DB Account full ARM Resource ID. This is an optional field, and if not provided, the resource will be created.')
+param aiCosmosDbAccountResourceId string = ''
+
 var abbrs = loadJsonContent('./abbreviations.json')
-var resourceToken = toLower(uniqueString(subscription().id, resourceGroup().id ,environmentName, location))
+var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 var functionAppName = !empty(apiServiceName) ? apiServiceName : '${abbrs.webSitesFunctions}api-${resourceToken}'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
-var name = toLower('${aiHubName}')
 var projectName = toLower('${aiProjectName}')
 
 // Create a short, unique suffix, that will be unique to each resource group
-var uniqueSuffix = toLower(uniqueString(subscription().id, resourceGroup().id, location))
+var uniqueSuffix = toLower(uniqueString(subscription().id, environmentName, location))
 
-// User assigned managed identity to be used by the function app to reach storage and service bus
-module apiUserAssignedIdentity './core/identity/userAssignedIdentity.bicep' = {
+// Organize resources in a resource group
+resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
+  name: !empty(resourceGroupName) ? resourceGroupName : '${abbrs.resourcesResourceGroups}${environmentName}'
+  location: location
+  tags: tags
+}
+
+// User assigned managed identity to be used by the function app to reach storage and other dependencies
+// Assign specific roles to this identity in the RBAC module
+module apiUserAssignedIdentity 'br/public:avm/res/managed-identity/user-assigned-identity:0.4.1' = {
   name: 'apiUserAssignedIdentity'
+  scope: rg
   params: {
     location: location
     tags: tags
-    identityName: !empty(apiUserAssignedIdentityName) ? apiUserAssignedIdentityName : '${abbrs.managedIdentityUserAssignedIdentities}api-${resourceToken}'
+    name: !empty(apiUserAssignedIdentityName) ? apiUserAssignedIdentityName : '${abbrs.managedIdentityUserAssignedIdentities}api-${resourceToken}'
   }
 }
 
-// The application backend is a function app
-module appServicePlan './core/host/appserviceplan.bicep' = {
+// Create an App Service Plan to group applications under the same payment plan and SKU
+module appServicePlan 'br/public:avm/res/web/serverfarm:0.1.1' = {
   name: 'appserviceplan'
+  scope: rg
   params: {
     name: !empty(appServicePlanName) ? appServicePlanName : '${abbrs.webServerFarms}${resourceToken}'
-    location: location
-    tags: tags
     sku: {
       name: 'FC1'
       tier: 'FlexConsumption'
     }
+    reserved: true
+    location: location
+    tags: tags
   }
 }
 
-module api './app/api.bicep' = {
-  name: 'api'
+// Monitor application with Azure Monitor - Log Analytics and Application Insights
+module logAnalytics 'br/public:avm/res/operational-insights/workspace:0.11.1' = {
+  name: '${uniqueString(deployment().name, location)}-loganalytics'
+  scope: rg
   params: {
-    name: functionAppName
+    name: !empty(logAnalyticsName) ? logAnalyticsName : '${abbrs.operationalInsightsWorkspaces}${resourceToken}'
     location: location
     tags: tags
-    applicationInsightsName: monitoring.outputs.applicationInsightsName
-    appServicePlanId: appServicePlan.outputs.id
-    runtimeName: 'dotnet-isolated'
-    runtimeVersion: '8.0'
-    storageAccountName: storage.outputs.name
-    deploymentStorageContainerName: deploymentStorageContainerName
-    identityId: apiUserAssignedIdentity.outputs.identityId
-    identityClientId: apiUserAssignedIdentity.outputs.identityClientId
-    appSettings: {
-      PROJECT_CONNECTION_STRING: aiProject.outputs.projectConnectionString
-      STORAGE_CONNECTION__queueServiceUri: 'https://${storage.outputs.name}.queue.${environment().suffixes.storage}'
+    dataRetention: 30
+  }
+}
+ 
+module monitoring 'br/public:avm/res/insights/component:0.6.0' = {
+  name: '${uniqueString(deployment().name, location)}-appinsights'
+  scope: rg
+  params: {
+    name: !empty(applicationInsightsName) ? applicationInsightsName : '${abbrs.insightsComponents}${resourceToken}'
+    location: location
+    tags: tags
+    workspaceResourceId: logAnalytics.outputs.resourceId
+    disableLocalAuth: true
+  }
+}
+
+// Backing storage for Azure functions backend API
+module storage 'br/public:avm/res/storage/storage-account:0.8.3' = {
+  name: 'storage'
+  scope: rg
+  params: {
+    name: !empty(storageAccountName) ? storageAccountName : '${abbrs.storageStorageAccounts}${resourceToken}'
+    allowBlobPublicAccess: false
+    allowSharedKeyAccess: false // Disable local authentication methods as per policy
+    dnsEndpointType: 'Standard'
+    publicNetworkAccess: vnetEnabled ? 'Disabled' : 'Enabled'
+    // When vNet is enabled, restrict access but allow Azure services and specifically grant access to the AI Agent service
+    networkAcls: vnetEnabled ? {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices' // Allow Azure services including AI Agent service
+      resourceAccessRules: [
+        {
+          tenantId: tenant().tenantId
+          resourceId: aiDependencies.outputs.aiservicesID // Grant explicit access to AI Agent service
+        }
+      ]
+    } : {
+      defaultAction: 'Allow'
+      bypass: 'AzureServices'
     }
-    virtualNetworkSubnetId: skipVnet ? '' : serviceVirtualNetwork.outputs.appSubnetID
+    blobServices: {
+      containers: [{name: deploymentStorageContainerName}]
+    }
+    queueServices: {
+      queues: [
+        { name: 'input' }
+        { name: 'output' }
+      ]
+    }
+    minimumTlsVersion: 'TLS1_2'  // Enforcing TLS 1.2 for better security
+    location: location
+    tags: tags
   }
 }
 
 // Dependent resources for the Azure Machine Learning workspace
 module aiDependencies './agent/standard-dependent-resources.bicep' = {
-  name: 'dependencies${name}${uniqueSuffix}deployment'
+  name: 'dependencies${projectName}${uniqueSuffix}deployment'
+  scope: rg
   params: {
     location: location
-    storageName: 'st${uniqueSuffix}'
-    keyvaultName: 'kv${name}${uniqueSuffix}'
+    storageName: 'stai${uniqueSuffix}'
     aiServicesName: '${aiServicesName}${uniqueSuffix}'
     aiSearchName: '${aiSearchName}${uniqueSuffix}'
+    cosmosDbName: '${cosmosDbName}${uniqueSuffix}'
     tags: tags
 
      // Model deployment parameters
@@ -176,42 +236,21 @@ module aiDependencies './agent/standard-dependent-resources.bicep' = {
      modelVersion: modelVersion
      modelSkuName: modelSkuName
      modelCapacity: modelCapacity  
-     modelLocation: modelLocation
+     modelLocation: location
 
      aiServiceAccountResourceId: aiServiceAccountResourceId
      aiSearchServiceResourceId: aiSearchServiceResourceId
      aiStorageAccountResourceId: aiStorageAccountResourceId
+     aiCosmosDbAccountResourceId: aiCosmosDbAccountResourceId
     }
 }
 
-module aiHub './agent/standard-ai-hub.bicep' = {
-  name: '${name}${uniqueSuffix}deployment'
-  params: {
-    // workspace organization
-    aiHubName: '${name}${uniqueSuffix}'
-    aiHubFriendlyName: aiHubFriendlyName
-    aiHubDescription: aiHubDescription
-    location: location
-    tags: tags
-    capabilityHostName: '${name}${uniqueSuffix}${capabilityHostName}'
-
-    aiSearchName: aiDependencies.outputs.aiSearchName
-    aiSearchId: aiDependencies.outputs.aisearchID
-
-    aiServicesName: aiDependencies.outputs.aiServicesName
-    aiServicesId: aiDependencies.outputs.aiservicesID
-    aiServicesTarget: aiDependencies.outputs.aiservicesTarget
-    
-    keyVaultId: aiDependencies.outputs.keyvaultId
-    storageAccountId: aiDependencies.outputs.storageId
-  }
-}
-
-
 module aiProject './agent/standard-ai-project.bicep' = {
   name: '${projectName}${uniqueSuffix}deployment'
+  scope: rg
   params: {
     // workspace organization
+    aiServicesAccountName: aiDependencies.outputs.aiServicesName
     aiProjectName: '${projectName}${uniqueSuffix}'
     aiProjectFriendlyName: aiProjectFriendlyName
     aiProjectDescription: aiProjectDescription
@@ -219,123 +258,122 @@ module aiProject './agent/standard-ai-project.bicep' = {
     tags: tags
     
     // dependent resources
-    capabilityHostName: '${projectName}${uniqueSuffix}${capabilityHostName}'
-
-    aiHubId: aiHub.outputs.aiHubID
-    acsConnectionName: aiHub.outputs.acsConnectionName
-    aoaiConnectionName: aiHub.outputs.aoaiConnectionName
+    aiSearchName: aiDependencies.outputs.aiSearchName
+    aiSearchSubscriptionId: aiDependencies.outputs.aiSearchServiceSubscriptionId
+    aiSearchResourceGroupName: aiDependencies.outputs.aiSearchServiceResourceGroupName
+    storageAccountName: aiDependencies.outputs.storageAccountName
+    storageAccountSubscriptionId: aiDependencies.outputs.storageAccountSubscriptionId
+    storageAccountResourceGroupName: aiDependencies.outputs.storageAccountResourceGroupName
+    cosmosDbAccountName: aiDependencies.outputs.cosmosDbAccountName
+    cosmosDbAccountSubscriptionId: aiDependencies.outputs.cosmosDbAccountSubscriptionId
+    cosmosDbAccountResourceGroupName: aiDependencies.outputs.cosmosDbAccountResourceGroupName
   }
 }
 
-// Backing storage for Azure functions backend processor
-module storage 'core/storage/storage-account.bicep' = {
-  name: 'storage'
+module api './app/api.bicep' = {
+  name: 'api'
+  scope: rg
   params: {
-    name: !empty(storageAccountName) ? storageAccountName : '${abbrs.storageStorageAccounts}${resourceToken}'
+    name: functionAppName
     location: location
     tags: tags
-    containers: [
-      {name: deploymentStorageContainerName}
-    ]
-    networkAcls: skipVnet ? {} : {
-      bypass: 'None'
-      virtualNetworkRules: [
-        {
-          id: serviceVirtualNetwork.outputs.appSubnetID
-          action: 'Allow'
-          state: 'Succeeded'
-        }
-      ]
-      resourceAccessRules: [
-        {
-          tenantId: tenant().tenantId
-          resourceId: aiProject.outputs.aiProjectResourceId
-        }
-      ]
-      defaultAction: 'Deny'
+    applicationInsightsName: monitoring.outputs.name
+    appServicePlanId: appServicePlan.outputs.resourceId
+    runtimeName: 'dotnet-isolated'
+    runtimeVersion: '8.0'
+    storageAccountName: storage.outputs.name
+    enableBlob: storageEndpointConfig.enableBlob
+    enableQueue: storageEndpointConfig.enableQueue
+    enableTable: storageEndpointConfig.enableTable
+    deploymentStorageContainerName: deploymentStorageContainerName
+    identityId: apiUserAssignedIdentity.outputs.resourceId
+    identityClientId: apiUserAssignedIdentity.outputs.clientId
+    appSettings: {
+      PROJECT_ENDPOINT: aiProject.outputs.projectEndpoint
+      MODEL_DEPLOYMENT_NAME: modelName
+      STORAGE_CONNECTION__queueServiceUri: 'https://${storage.outputs.name}.queue.${environment().suffixes.storage}'
+      STORAGE_CONNECTION__clientId: apiUserAssignedIdentity.outputs.clientId
+      STORAGE_CONNECTION__credential: 'managedidentity'
+      PROJECT_ENDPOINT__clientId: apiUserAssignedIdentity.outputs.clientId
     }
+    virtualNetworkSubnetId: vnetEnabled ? serviceVirtualNetwork.outputs.appSubnetID : ''
   }
 }
 
-module aiServiceRoleAssignments './agent/ai-service-role-assignments.bicep' = {
-  name: 'aiserviceroleassignments${projectName}${uniqueSuffix}deployment'
+module projectRoleAssignments './agent/standard-ai-project-role-assignments.bicep' = {
+  name: 'aiprojectroleassignments${projectName}${uniqueSuffix}deployment'
+  scope: rg
   params: {
+    aiProjectPrincipalId: aiProject.outputs.aiProjectPrincipalId
+    userPrincipalId: principalId
+    allowUserIdentityPrincipal: true // Enable user identity role assignments
     aiServicesName: aiDependencies.outputs.aiServicesName
-    aiProjectPrincipalId: aiProject.outputs.aiProjectPrincipalId
-    aiProjectId: aiProject.outputs.aiProjectResourceId
-  }
-}
-
-module aiSearchRoleAssignments './agent/ai-search-role-assignments.bicep' = {
-  name: 'aisearchroleassignments${projectName}${uniqueSuffix}deployment'
-  params: {
     aiSearchName: aiDependencies.outputs.aiSearchName
+    aiCosmosDbName: aiDependencies.outputs.cosmosDbAccountName
+    aiStorageAccountName: aiDependencies.outputs.storageAccountName
+    integrationStorageAccountName: storage.outputs.name
+    functionAppManagedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
+    allowFunctionAppIdentityPrincipal: true // Enable function app identity role assignments
+  }
+}
+
+module aiProjectCapabilityHost './agent/standard-ai-project-capability-host.bicep' = {
+  name: 'capabilityhost${projectName}${uniqueSuffix}deployment'
+  scope: rg
+  params: {
+    aiServicesAccountName: aiDependencies.outputs.aiServicesName
+    projectName: aiProject.outputs.aiProjectName
+    aiSearchConnection: aiProject.outputs.aiSearchConnection
+    azureStorageConnection: aiProject.outputs.azureStorageConnection
+    cosmosDbConnection: aiProject.outputs.cosmosDbConnection
+
+    accountCapHost: '${accountCapabilityHostName}${uniqueSuffix}'
+    projectCapHost: '${projectCapabilityHostName}${uniqueSuffix}'
+  }
+  dependsOn: [ projectRoleAssignments ]
+}
+
+module postCapabilityHostCreationRoleAssignments './agent/post-capability-host-role-assignments.bicep' = {
+  name: 'postcaphostra${projectName}${uniqueSuffix}deployment'
+  scope: rg
+  params: {
     aiProjectPrincipalId: aiProject.outputs.aiProjectPrincipalId
-    aiProjectId: aiProject.outputs.aiProjectResourceId
+    aiProjectWorkspaceId: aiProject.outputs.projectWorkspaceId
+    aiStorageAccountName: aiDependencies.outputs.storageAccountName
+    cosmosDbAccountName: aiDependencies.outputs.cosmosDbAccountName
   }
+  dependsOn: [ aiProjectCapabilityHost ]
 }
 
-var storageRoleDefinitionId  = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b' // Storage Blob Data Owner role
-
-// Allow access from api to storage account using a managed identity
-module storageRoleAssignmentApi 'app/storage-Access.bicep' = {
-  name: 'storageRoleAssignmentapi'
-  params: {
-    storageAccountName: storage.outputs.name
-    roleDefinitionID: storageRoleDefinitionId
-    principalID: apiUserAssignedIdentity.outputs.identityPrincipalId
-    principalType: 'ServicePrincipal'
-  }
+// Define the configuration object locally to pass to the modules
+var storageEndpointConfig = {
+  enableBlob: true  // Required for AzureWebJobsStorage, .zip deployment, Event Hubs trigger and Timer trigger checkpointing
+  enableQueue: true  // Required for Durable Functions and MCP trigger
+  enableTable: false  // Required for Durable Functions and OpenAI triggers and bindings
+  enableFiles: false   // Not required, used in legacy scenarios
+  allowUserIdentityPrincipal: true   // Allow interactive user identity to access for testing and debugging
 }
 
-var storageQueueDataContributorRoleDefinitionId  = '974c5e8b-45b9-4653-ba55-5f855dd0fb88' // Storage Queue Data Contributor
-
-module storageQueueDataContributorRoleAssignmentprocessor 'app/storage-Access.bicep' = {
-  name: 'storageQueueDataContributorRoleAssignmentprocessor'
+// Consolidated Role Assignments
+module rbac 'app/rbac.bicep' = {
+  name: 'rbacAssignments'
+  scope: rg
   params: {
     storageAccountName: storage.outputs.name
-    roleDefinitionID: storageQueueDataContributorRoleDefinitionId
-    principalID: apiUserAssignedIdentity.outputs.identityPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Allow access from AI project to storage account using a managed identity
-module storageQueueDataContributorRoleAssignmentAIProject 'app/storage-Access.bicep' = {
-  name: 'storageQueueDataContributorRoleAssignmentAIProject'
-  params: {
-    storageAccountName: storage.outputs.name
-    roleDefinitionID: storageQueueDataContributorRoleDefinitionId
-    principalID: aiProject.outputs.aiProjectPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-module storageQueueDataContributorRoleAssignmentUserIdentityprocessor 'app/storage-Access.bicep' = {
-  name: 'storageQueueDataContributorRoleAssignmentUserIdentityprocessor'
-  params: {
-    storageAccountName: storage.outputs.name
-    roleDefinitionID: storageQueueDataContributorRoleDefinitionId
-    principalID: principalId
-    principalType: 'User'
-  }
-}
-
-var storageTableDataContributorRoleDefinitionId  = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3' // Storage Table Data Contributor
-
-module storageTableDataContributorRoleAssignmentprocessor 'app/storage-Access.bicep' = {
-  name: 'storageTableDataContributorRoleAssignmentprocessor'
-  params: {
-    storageAccountName: storage.outputs.name
-    roleDefinitionID: storageTableDataContributorRoleDefinitionId
-    principalID: apiUserAssignedIdentity.outputs.identityPrincipalId
-    principalType: 'ServicePrincipal'
+    appInsightsName: monitoring.outputs.name
+    managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
+    userIdentityPrincipalId: principalId
+    enableBlob: storageEndpointConfig.enableBlob
+    enableQueue: storageEndpointConfig.enableQueue
+    enableTable: storageEndpointConfig.enableTable
+    allowUserIdentityPrincipal: storageEndpointConfig.allowUserIdentityPrincipal
   }
 }
 
 // Virtual Network & private endpoint to blob storage
-module serviceVirtualNetwork 'app/vnet.bicep' =  if (!skipVnet) {
+module serviceVirtualNetwork 'app/vnet.bicep' =  if (vnetEnabled) {
   name: 'serviceVirtualNetwork'
+  scope: rg
   params: {
     location: location
     tags: tags
@@ -343,60 +381,33 @@ module serviceVirtualNetwork 'app/vnet.bicep' =  if (!skipVnet) {
   }
 }
 
-module storagePrivateEndpoint 'app/storage-PrivateEndpoint.bicep' = if (!skipVnet) {
+module storagePrivateEndpoint 'app/storage-PrivateEndpoint.bicep' = if (vnetEnabled) {
   name: 'servicePrivateEndpoint'
+  scope: rg
   params: {
     location: location
     tags: tags
     virtualNetworkName: !empty(vNetName) ? vNetName : '${abbrs.networkVirtualNetworks}${resourceToken}'
-    subnetName: skipVnet ? '' : serviceVirtualNetwork.outputs.peSubnetName
+    subnetName: vnetEnabled ? serviceVirtualNetwork.outputs.peSubnetName : '' // Keep conditional check for safety, though module won't run if !vnetEnabled
     resourceName: storage.outputs.name
-  }
-}
-
-// Monitor application with Azure Monitor
-module monitoring './core/monitor/monitoring.bicep' = {
-  name: 'monitoring'
-  params: {
-    location: location
-    tags: tags
-    logAnalyticsName: !empty(logAnalyticsName) ? logAnalyticsName : '${abbrs.operationalInsightsWorkspaces}${resourceToken}'
-    applicationInsightsName: !empty(applicationInsightsName) ? applicationInsightsName : '${abbrs.insightsComponents}${resourceToken}'
-    disableLocalAuth: disableLocalAuth  
-  }
-}
-
-var monitoringRoleDefinitionId = '3913510d-42f4-4e42-8a64-420c390055eb' // Monitoring Metrics Publisher role ID
-
-// Allow access from api to application insights using a managed identity
-module appInsightsRoleAssignmentApi './core/monitor/appinsights-access.bicep' = {
-  name: 'appInsightsRoleAssignmentapi'
-  params: {
-    appInsightsName: monitoring.outputs.applicationInsightsName
-    roleDefinitionID: monitoringRoleDefinitionId
-    principalID: apiUserAssignedIdentity.outputs.identityPrincipalId
-  }
-}
-
-var AzureAIAdministratorRoleDefinitionId = 'b78c5d69-af96-48a3-bf8d-a8b4d589de94' // Azure AI Administrator role ID
-// Enable access to AI Project from the Azure Function user assigned identity
-resource AIProjectRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(AzureAIAdministratorRoleDefinitionId, aiProjectName, resourceId('Microsoft.MachineLearningServices/workspaces', aiProjectName))
-  properties: {
-    roleDefinitionId: resourceId('Microsoft.Authorization/roleDefinitions', AzureAIAdministratorRoleDefinitionId)
-    principalId: apiUserAssignedIdentity.outputs.identityPrincipalId
-    principalType: 'ServicePrincipal'
+    enableBlob: storageEndpointConfig.enableBlob
+    enableQueue: storageEndpointConfig.enableQueue
+    enableTable: storageEndpointConfig.enableTable
   }
 }
 
 // App outputs
-output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.applicationInsightsConnectionString
+output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.connectionString
 output AZURE_LOCATION string = location
 output AZURE_TENANT_ID string = tenant().tenantId
 output SERVICE_API_NAME string = api.outputs.SERVICE_API_NAME
-output SERVICE_API_URI string = api.outputs.SERVICE_API_URI
+output SERVICE_API_URI string = 'https://${api.outputs.SERVICE_API_NAME}.azurewebsites.net'
 output AZURE_FUNCTION_APP_NAME string = api.outputs.SERVICE_API_NAME
-output RESOURCE_GROUP string = resourceGroup().name
+output RESOURCE_GROUP string = rg.name
 output STORAGE_ACCOUNT_NAME string = storage.outputs.name
-output PROJECT_CONNECTION_STRING string = aiProject.outputs.projectConnectionString
+output AI_SERVICES_NAME string = aiDependencies.outputs.aiServicesName
+
+// AI Foundry outputs
+output PROJECT_ENDPOINT string = aiProject.outputs.projectEndpoint
+output MODEL_DEPLOYMENT_NAME string = modelName
 output STORAGE_CONNECTION__queueServiceUri string = 'https://${storage.outputs.name}.queue.${environment().suffixes.storage}'

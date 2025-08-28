@@ -7,16 +7,20 @@ if [ ! -f "./app/local.settings.json" ]; then
     output=$(azd env get-values)
 
     # Initialize variables
-    AIProjectConnectionString=""
+    AIProjectEndpoint=""
     StorageConnectionQueue=""
+    ModelDeploymentName=""
 
     # Parse the output to get the endpoint URLs
     while IFS= read -r line; do
-        if [[ $line == *"PROJECT_CONNECTION_STRING"* ]]; then
-            AIProjectConnectionString=$(echo "$line" | cut -d '=' -f 2 | tr -d '"')
+        if [[ $line == *"PROJECT_ENDPOINT"* ]]; then
+            AIProjectEndpoint=$(echo "$line" | cut -d '=' -f 2 | tr -d '"')
         fi
         if [[ $line == *"STORAGE_CONNECTION__queueServiceUri"* ]]; then
             StorageConnectionQueue=$(echo "$line" | cut -d '=' -f 2 | tr -d '"')
+        fi
+        if [[ $line == *"MODEL_DEPLOYMENT_NAME"* ]]; then
+            ModelDeploymentName=$(echo "$line" | cut -d '=' -f 2 | tr -d '"')
         fi
     done <<< "$output"
 
@@ -26,7 +30,8 @@ if [ ! -f "./app/local.settings.json" ]; then
     "Values": {
         "AzureWebJobsStorage": "UseDevelopmentStorage=true",
         "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
-        "PROJECT_CONNECTION_STRING": "$AIProjectConnectionString",
+        "PROJECT_ENDPOINT": "$AIProjectEndpoint",
+        "MODEL_DEPLOYMENT_NAME": "$ModelDeploymentName",
         "STORAGE_CONNECTION__queueServiceUri": "$StorageConnectionQueue"
     }
 }

@@ -60,11 +60,21 @@ azd provision
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
     "STORAGE_CONNECTION__queueServiceUri": "https://<storageaccount>.queue.core.windows.net",
-    "PROJECT_CONNECTION_STRING": "<project connnection for AI Project>",
+    "PROJECT_ENDPOINT": "<project endpoint for AI Project>",
+    "MODEL_DEPLOYMENT_NAME": "<model deployment name>",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true"
     }
 }
 ```
+
+### Authentication
+
+This sample uses **managed identity authentication** for secure, production-ready access to Azure resources:
+
+- **Local Development**: Uses `DefaultAzureCredential` which automatically detects your Azure CLI login or Visual Studio credentials
+- **Azure Deployment**: Uses a user-assigned managed identity that is automatically configured by the infrastructure
+
+The authentication is handled transparently - the code automatically detects whether it's running locally or in Azure and uses the appropriate authentication method.
 
 ## Run your app using Visual Studio Code
 

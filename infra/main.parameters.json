@@ -20,18 +20,6 @@
     "storageResourceGroupName": {
       "value": "${AZURE_STORAGE_RESOURCE_GROUP}"
     },
-    "azFunctionHostingPlanType": {
-      "value": "flexconsumption"
-    },
-    "aiHubName": {
-        "value": "hub-demo"
-    },
-    "aiHubFriendlyName": {
-      "value": "Agents Hub resource"
-    },
-    "aiHubDescription": {
-      "value": "This is an example AI resource for use in Azure AI Studio."
-    },
     "aiProjectName": {
       "value": "project-demo"
     },
@@ -47,20 +35,23 @@
     "aiSearchName": {
       "value": "agent-ai-search"
     },
-    "capabilityHostName": {
-      "value": "caphost1"
+    "accountCapabilityHostName": {
+      "value": "caphostacc"
+    },
+    "projectCapabilityHostName": {
+      "value": "caphostproj"
     },
     "aiServicesName": {
       "value": "agent-ai-services"
     },
     "modelName": {
-      "value": "gpt-4o-mini"
+      "value": "gpt-4.1-mini"
     },
     "modelFormat": {
       "value": "OpenAI"
     },
     "modelVersion": {
-      "value": "2024-07-18"
+      "value": "2025-04-14"
     },
     "modelSkuName": {
       "value": "GlobalStandard"
@@ -68,8 +59,8 @@
     "modelCapacity": {
       "value": 50
     },
-    "modelLocation": {
-      "value": "eastus"
+    "cosmosDbName": {
+      "value": "agent-ai-cosmos"
     },
     "aiServiceAccountResourceId": {
       "value": ""
@@ -78,6 +69,9 @@
       "value": ""
     },
     "aiStorageAccountResourceId":{
+      "value": ""
+    },
+    "aiCosmosDbAccountResourceId": {
       "value": ""
     }
   }

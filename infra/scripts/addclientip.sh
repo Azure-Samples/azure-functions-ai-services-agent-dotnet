@@ -16,16 +16,29 @@ done <<< "$output"
 ConfigFolder=$(echo "$ResourceGroup" | cut -d'-' -f2-)
 configFile=".azure/$ConfigFolder/config.json"
 
+vnetDisabled=false
 if [[ -f "$configFile" ]]; then
     jsonContent=$(cat "$configFile")
-    skipVnet=$(echo "$jsonContent" | grep '"skipVnet"' | sed 's/.*"skipVnet":\s*"\([^"]*\)".*/\1/')
+    
+    # Check for skipVnet parameter first
+    if echo "$jsonContent" | grep -q '"skipVnet"'; then
+        skipVnet=$(echo "$jsonContent" | grep '"skipVnet"' | sed 's/.*"skipVnet":\s*\([^,}]*\).*/\1/' | tr -d ' ')
+        if echo "$skipVnet" | grep -iq "true"; then
+            vnetDisabled=true
+        fi
+    # Check for vnetEnabled parameter
+    elif echo "$jsonContent" | grep -q '"vnetEnabled"'; then
+        vnetEnabled=$(echo "$jsonContent" | grep '"vnetEnabled"' | sed 's/.*"vnetEnabled":\s*\([^,}]*\).*/\1/' | tr -d ' ')
+        if echo "$vnetEnabled" | grep -iq "false"; then
+            vnetDisabled=true
+        fi
+    fi
 else
     echo "Config file $configFile not found. Assuming VNet is enabled."
-    skipVnet="false"
+    vnetDisabled=false
 fi
 
-# skipVnet is in the form "skipVnet": false
-if echo "$skipVnet" | grep -iq "true"; then
+if [ "$vnetDisabled" = true ]; then
     echo "VNet is not enabled. Skipping adding the client IP to the network rule of the Azure Functions storage account"
 else
     echo "VNet is enabled. Adding the client IP to the network rule of the Azure Functions storage account"
@@ -33,5 +46,11 @@ else
     # Get the client IP
     ClientIP=$(curl -s https://api.ipify.org)
 
+    # First, ensure the storage account allows access from selected networks (not completely disabled)
+    echo "Configuring storage account to allow access from selected networks..."
+    az storage account update --name "$StorageAccount" --resource-group "$ResourceGroup" --public-network-access Enabled > /dev/null
+    
+    # Add the client IP to the network rules
     az storage account network-rule add --resource-group "$ResourceGroup" --account-name "$StorageAccount" --ip-address "$ClientIP" > /dev/null
+    echo "Client IP $ClientIP added to the network rule of the Azure Functions storage account"
 fi

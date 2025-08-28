@@ -6,6 +6,19 @@ Azure AI Agents supports function calling, which allows you to describe the stru
 
 To use all features of function calling including parallel functions, you need to use a model that was released after November 6, 2023.
 
+## Required Using Statements
+
+```C#
+using System.Text.Json;
+using Azure;
+using Azure.AI.Projects;
+using Azure.AI.Agents.Persistent;
+using Azure.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Logging;
+```
 
 ## Define a function for your agent to call
 
@@ -57,18 +70,36 @@ In the sample below we create a client and an agent that has the tools definitio
 
 ```C#
 // Initialize the client and create agent for the tools Azure Functions that the agent can use
-   private static async Task<(AgentsClient, AgentThread, Agent)> InitializeClient(ILogger logger)
+   private static (AIProjectClient, PersistentAgentThread, PersistentAgent) InitializeClient(ILogger logger)
     {
         try
         {
-            // Create a project client using the connection string from local.settings.json
-            var connectionString = Environment.GetEnvironmentVariable("PROJECT_CONNECTION_STRING");
-            if (string.IsNullOrEmpty(connectionString))
+            // Create a project client using the project endpoint from local.settings.json
+            var projectEndpoint = Environment.GetEnvironmentVariable("PROJECT_ENDPOINT");
+            if (string.IsNullOrEmpty(projectEndpoint))
             {
-                throw new InvalidOperationException("PROJECT_CONNECTION_STRING is not set.");
+                throw new InvalidOperationException("PROJECT_ENDPOINT is not set.");
             }
 
-            AgentsClient client = new AgentsClient(connectionString, new DefaultAzureCredential());
+            // Get the managed identity client ID for user-assigned managed identity
+            var clientId = Environment.GetEnvironmentVariable("PROJECT_ENDPOINT__clientId");
+            
+            // Create credential - use specific managed identity client ID if available (for Azure deployment)
+            // or fallback to DefaultAzureCredential for local development
+            Azure.Core.TokenCredential credential;
+            if (!string.IsNullOrEmpty(clientId))
+            {
+                credential = new ManagedIdentityCredential(clientId);
+                logger.LogInformation($"Using user-assigned managed identity with client ID: {clientId}");
+            }
+            else
+            {
+                credential = new DefaultAzureCredential();
+                logger.LogInformation("Using DefaultAzureCredential for local development");
+            }
+
+            AIProjectClient projectClient = new AIProjectClient(new Uri(projectEndpoint), credential);
+            PersistentAgentsClient agentsClient = projectClient.GetPersistentAgentsClient();
 
             // Get the connection string from local.settings.json
             var storageConnectionString = Environment.GetEnvironmentVariable("STORAGE_CONNECTION__queueServiceUri");
@@ -110,21 +141,24 @@ In the sample below we create a client and an agent that has the tools definitio
                 )
             );
 
+            // Get model name from environment or use default
+            var modelName = Environment.GetEnvironmentVariable("MODEL_DEPLOYMENT_NAME") ?? "gpt-4.1-mini";
+
             // Create an agent with the Azure Function tool to get the weather
-            Response<Agent> agent = await client.CreateAgentAsync(
-                model: "gpt-4o-mini",
+            PersistentAgent agent = agentsClient.Administration.CreateAgent(
+                model: modelName,
                 name: "azure-function-agent-get-weather",
                 instructions: "You are a helpful support agent. Answer the user's questions to the best of your ability.",
                 tools: new List<ToolDefinition> { azureFunctionTool }
             );
 
-            logger.LogInformation($"Created agent, agent ID: {agent.Value.Id}");
+            logger.LogInformation($"Created agent, agent ID: {agent.Id}");
 
             // Create a thread
-            Response<AgentThread> thread = await client.CreateThreadAsync();
-            logger.LogInformation($"Created thread, thread ID: {thread.Value.Id}");
+            PersistentAgentThread thread = agentsClient.Threads.CreateThread();
+            logger.LogInformation($"Created thread, thread ID: {thread.Id}");
 
-            return (client, thread, agent);
+            return (projectClient, thread, agent);
         }
         catch (Exception ex)
         {
@@ -140,26 +174,26 @@ In the sample below we create a client and an agent that has the tools definitio
 
 ```C#
 // Initialize the agent client and thread
-var (client, thread, agent) = await InitializeClient(logger);
+var (projectClient, thread, agent) = InitializeClient(logger);
+var agentsClient = projectClient.GetPersistentAgentsClient();
 
 // Send the prompt to the agent
-Response<ThreadMessage> messageResponse = await client.CreateMessageAsync(
+PersistentThreadMessage messageResponse = agentsClient.Messages.CreateMessage(
     thread.Id,
     MessageRole.User,
     "What is the weather in Seattle?");
-ThreadMessage message = messageResponse.Value;
 
-Response<ThreadRun> runResponse = await client.CreateRunAsync(thread, agent);
+ThreadRun runResponse = agentsClient.Runs.CreateRun(thread.Id, agent.Id);
 
 // Poll the run until it's completed
 do
 {
     await Task.Delay(TimeSpan.FromMilliseconds(500));
-    runResponse = await client.GetRunAsync(thread.Id, runResponse.Value.Id);
+    runResponse = agentsClient.Runs.GetRun(thread.Id, runResponse.Id);
 }
-while (runResponse.Value.Status == RunStatus.Queued
-    || runResponse.Value.Status == RunStatus.InProgress
-    || runResponse.Value.Status == RunStatus.RequiresAction);
+while (runResponse.Status == RunStatus.Queued
+    || runResponse.Status == RunStatus.InProgress
+    || runResponse.Status == RunStatus.RequiresAction);
 ```
 
 ---
@@ -168,36 +202,67 @@ while (runResponse.Value.Status == RunStatus.Queued
 
 ```C#
     // Get messages from the assistant thread
-    var messages = await client.GetMessagesAsync(thread.Id);
+    var messages = agentsClient.Messages.GetMessages(thread.Id);
     logger.LogInformation($"Messages: {messages}");
 
     // Get the most recent message from the assistant
     string lastMsg = string.Empty;
-    foreach (ThreadMessage threadMessage in messages.Value)
+    foreach (PersistentThreadMessage threadMessage in messages)
     {
-    MessageContent contentItem = threadMessage.ContentItems[0];
-    if (contentItem is MessageTextContent textItem)
-    {
-        lastMsg = textItem.Text;
-        break;
-    }
+        MessageContent contentItem = threadMessage.ContentItems[0];
+        if (contentItem is MessageTextContent textItem)
+        {
+            lastMsg = textItem.Text;
+            break;
+        }
     }
 
     logger.LogInformation($"Most recent message: {lastMsg}");
 
     // Delete the agent once done
-    await client.DeleteAgentAsync(agent.Id);
+    agentsClient.Administration.DeleteAgent(agent.Id);
     logger.LogInformation("Deleted agent");
 
-    var response = req.CreateResponse(System.Net.HttpStatusCode.OK);
-    await response.WriteStringAsync(lastMsg ?? string.Empty);
-    return response;
+    return new OkObjectResult(lastMsg);
     }
     catch (Exception ex)
     {
         logger.LogError($"Error processing prompt: {ex.Message}");
-        var errorResponse = req.CreateResponse(System.Net.HttpStatusCode.InternalServerError);
-        await errorResponse.WriteStringAsync("An error occurred while processing the request.");
-        return errorResponse;
+        return new BadRequestObjectResult("An error occurred while processing the request.");
     }
 ```
+
+## Configuration
+
+### Authentication
+
+This sample uses **managed identity authentication** for secure access to Azure AI Project resources:
+
+- **Local Development**: Uses `DefaultAzureCredential` which will use your Azure CLI login or Visual Studio credentials
+- **Azure Deployment**: Uses a user-assigned managed identity with the client ID specified in `PROJECT_ENDPOINT__clientId`
+
+The authentication logic automatically detects the environment and uses the appropriate credential type.
+
+### Required Environment Variables
+
+The following environment variables must be configured in your `local.settings.json` file for local development:
+
+```json
+{
+  "IsEncrypted": "false",
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "PROJECT_ENDPOINT": "<project endpoint for AI Project>",
+    "MODEL_DEPLOYMENT_NAME": "<model deployment name>",
+    "STORAGE_CONNECTION__queueServiceUri": "<queue service URI for Azure Storage>"
+  }
+}
+```
+
+- `PROJECT_ENDPOINT`: The endpoint URL for your Azure AI Project
+- `MODEL_DEPLOYMENT_NAME`: The name of the deployed AI model (e.g., "gpt-4o-mini")
+- `STORAGE_CONNECTION__queueServiceUri`: Queue service URI for Azure Storage
+- `AzureWebJobsStorage`: Storage connection for Azure Functions runtime
+
+**Note**: When deployed to Azure, the infrastructure automatically provides additional environment variables like `PROJECT_ENDPOINT__clientId` for managed identity authentication.
